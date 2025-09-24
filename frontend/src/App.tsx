@@ -16,6 +16,7 @@ import { NoMncModal, checkForMetaNetClient } from 'metanet-react-prompt'
 import { WalletClient, Utils, Random } from '@bsv/sdk'
 import './App.scss'
 import { IdentitySearchField } from '@bsv/identity-react'
+import { MessageBoxClient } from '@bsv/message-box-client'
 
 const AppBarPlaceholder = styled('div')({
   height: '4em'
@@ -50,6 +51,10 @@ const TotalsBar = styled('div')({
 })
 
 const walletClient = new WalletClient()
+const messageBoxClient = new MessageBoxClient({
+  walletClient,
+  host: 'https://messagebox.babbage.systems'
+})
 
 type LineItem = {
   description: string;
@@ -57,7 +62,17 @@ type LineItem = {
   price: number; // per-unit price in your display currency
 }
 
+type Invoice = {
+  date: number;
+  title: string;
+  payer: string;
+  payee: string;
+  lineItems: Array<LineItem>;
+}
+
 const PROTOCOL_ID = [1, 'basic invoicing'] as [1, string]
+
+const INVOICE_BOX = 'incoming-invoices'
 
 // Small helpers
 const toMoney = (n: number) => {
@@ -76,6 +91,8 @@ const App: React.FC = () => {
     { description: '', quantity: 1, price: 0 }
   ])
   const [createLoading, setCreateLoading] = useState<boolean>(false)
+  const [incomingInvoicesLoading, setIncomingInvoicesLoading] = useState<boolean>(true)
+  const [incomingInvoices, setIncomingInvoices] = useState<Array<Invoice>>([])
 
   // Run a 1s interval for checking if MNC is running
   useAsyncEffect(() => {
@@ -163,6 +180,7 @@ const App: React.FC = () => {
           payer: createPayer,
           title: createTitle.trim(),
           lineItems: normalizedItems,
+          date: Date.now(),
           totals: {
             subtotal
             // Taxes/fees/discounts can be added later; leaving simple for now
@@ -173,7 +191,16 @@ const App: React.FC = () => {
         counterparty: createPayer
       })).ciphertext
 
-      console.log('Created an encrypted invoice', encryptedInvoice)
+      const encryptedInvoiceWithKeyID = new Utils.Writer()
+        .write(Utils.toArray(keyID, 'base64'))
+        .write(encryptedInvoice)
+        .toArray()
+
+      await messageBoxClient.sendMessage({
+        messageBox: INVOICE_BOX,
+        recipient: createPayer,
+        body: Utils.toBase64(encryptedInvoiceWithKeyID)
+      })
 
       setCreateLoading(false)
       toast.dark('Invoice successfully created!')
@@ -189,6 +216,41 @@ const App: React.FC = () => {
       setCreateLoading(false)
     }
   }
+
+  // Load inciming invoices when the page loads
+  useAsyncEffect(async () => {
+    if (isMncMissing === false && incomingInvoicesLoading === true) {
+      const messages = await messageBoxClient.listMessages({
+        messageBox: INVOICE_BOX
+      })
+      const invoices: Array<Invoice> = []
+      for (const m of messages) {
+        try {
+          const invoiceReader = new Utils.Reader(Utils.toArray(m.body, 'base64'))
+          const keyID = Utils.toBase64(invoiceReader.read(16))
+          const encryptedInvoice = invoiceReader.read()
+          const decryptedInvoice = await walletClient.decrypt({
+            protocolID: PROTOCOL_ID,
+            keyID,
+            counterparty: m.sender,
+            ciphertext: encryptedInvoice
+          })
+          const parsed = JSON.parse(Utils.toUTF8(decryptedInvoice.plaintext))
+          invoices.push({
+            ...parsed,
+            payee: m.sender
+          })
+        } catch (e) {
+          console.error('Failed to parse incoming invoice', e)
+          await messageBoxClient.acknowledgeMessage({
+            messageIds: [m.messageId]
+          })
+        }
+      }
+      setIncomingInvoices(invoices)
+      setIncomingInvoicesLoading(false)
+    }
+  }, [isMncMissing, incomingInvoicesLoading])
 
   // The rest of this file just contains some UI code.
   // ----------------------------------------------------------------------
@@ -206,6 +268,46 @@ const App: React.FC = () => {
         </Toolbar>
       </AppBar>
       <AppBarPlaceholder />
+
+      {incomingInvoicesLoading ? (
+  <LinearProgress />
+) : (
+  incomingInvoices.map((inv: Invoice, i: number) => (
+    <LineItemRow key={i} elevation={2}>
+      <Typography variant="h6">{inv.title}</Typography>
+      <Typography variant="body2" color="text.secondary">
+        Date: {new Date(inv.date).toLocaleDateString()}
+      </Typography>
+      <Typography variant="body2">Payer: {inv.payer}</Typography>
+      <Typography variant="body2">Payee: {inv.payee}</Typography>
+
+      <Divider sx={{ my: 1 }} />
+
+      {inv.lineItems.map((li, j) => (
+        <Grid container spacing={2} key={j} sx={{ mb: 1 }}>
+          <Grid item xs={6}>
+            <Typography>{li.description}</Typography>
+          </Grid>
+          <Grid item xs={2}>
+            <Typography>Qty: {li.quantity}</Typography>
+          </Grid>
+          <Grid item xs={2}>
+            <Typography>Price: ${toMoney(li.price)}</Typography>
+          </Grid>
+          <Grid item xs={2}>
+            <Typography>Total: ${toMoney(li.quantity * li.price)}</Typography>
+          </Grid>
+        </Grid>
+      ))}
+
+      <TotalsBar>
+        <Typography variant="subtitle1">
+          Subtotal: ${toMoney(inv.lineItems.reduce((sum, li) => sum + li.quantity * li.price, 0))}
+        </Typography>
+      </TotalsBar>
+    </LineItemRow>
+  ))
+)}
 
       <AddMoreFab color='primary' onClick={() => { setCreateOpen(true) }}>
         <AddIcon />
