@@ -16,7 +16,7 @@ import { NoMncModal, checkForMetaNetClient } from 'metanet-react-prompt'
 import { WalletClient, Utils, Random } from '@bsv/sdk'
 import './App.scss'
 import { IdentitySearchField } from '@bsv/identity-react'
-import { MessageBoxClient } from '@bsv/message-box-client'
+import { MessageBoxClient, PeerPayClient } from '@bsv/message-box-client'
 
 const AppBarPlaceholder = styled('div')({
   height: '4em'
@@ -55,6 +55,9 @@ const messageBoxClient = new MessageBoxClient({
   walletClient,
   host: 'https://messagebox.babbage.systems'
 })
+const peerPayClient = new PeerPayClient({
+  walletClient
+})
 
 type LineItem = {
   description: string;
@@ -64,10 +67,15 @@ type LineItem = {
 
 type Invoice = {
   date: number;
+  id: string;
   title: string;
   payer: string;
   payee: string;
   lineItems: Array<LineItem>;
+  totals: {
+    subtotal: number;
+    total: number;
+  }
 }
 
 const PROTOCOL_ID = [1, 'basic invoicing'] as [1, string]
@@ -182,7 +190,8 @@ const App: React.FC = () => {
           lineItems: normalizedItems,
           date: Date.now(),
           totals: {
-            subtotal
+            subtotal,
+            total: subtotal
             // Taxes/fees/discounts can be added later; leaving simple for now
           }
         }), 'utf8'),
@@ -238,6 +247,7 @@ const App: React.FC = () => {
           const parsed = JSON.parse(Utils.toUTF8(decryptedInvoice.plaintext))
           invoices.push({
             ...parsed,
+            id: m.messageId,
             payee: m.sender
           })
         } catch (e) {
@@ -251,6 +261,18 @@ const App: React.FC = () => {
       setIncomingInvoicesLoading(false)
     }
   }, [isMncMissing, incomingInvoicesLoading])
+
+  const payInvoice = async (index: number) => {
+    const invoice: Invoice = incomingInvoices[index]
+    await peerPayClient.sendPayment({
+      recipient: invoice.payee,
+      amount: invoice.totals.total,
+      
+    })
+    await messageBoxClient.acknowledgeMessage({
+      messageIds: [invoice.id]
+    })
+  }
 
   // The rest of this file just contains some UI code.
   // ----------------------------------------------------------------------
